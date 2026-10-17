@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 WMS_URL = os.environ.get("WMS_URL") or "https://view.eumetsat.int/geoserver/wms"
 LAYER = (os.environ.get("LAYER") or "").strip()   # vide = choix automatique
 BBOX = (-25.0, -38.0, 55.0, 72.0)                 # lon min, lat min, lon max, lat max
-WIDTH, HEIGHT = 800, 1100                         # taille de l'image en pixels
+WIDTH, HEIGHT = 1200, 1650                        # taille de l'image en pixels
 FPS = 8                                           # images par seconde dans la vidéo
 CATCHUP_DAYS = 5                                  # nombre de jours passés à vérifier
 MIN_FRAMES = 48                                   # en dessous : jour incomplet, ignoré
@@ -155,7 +155,7 @@ def fetch_frame(layer_list, t):
 
 
 try:
-    FONT = ImageFont.truetype(FONT_PATH, 30)
+    FONT = ImageFont.truetype(FONT_PATH, 42)
 except OSError:
     FONT = ImageFont.load_default()
 
@@ -170,9 +170,13 @@ def stamp(img, t):
 
 
 def encode(frames_dir, out, crf):
+    """Vidéo HEVC (H.265) : deux fois plus compacte que le H.264 à qualité égale,
+    lue nativement par macOS, iOS, QuickTime, Safari, Chrome et VLC."""
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS),
-                    "-i", f"{frames_dir}/f_%04d.png", "-c:v", "libx264",
-                    "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p",
+                    "-i", f"{frames_dir}/f_%04d.png", "-c:v", "libx265",
+                    "-preset", "medium", "-crf", str(crf),
+                    "-x265-params", "log-level=error",
+                    "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart", out], check=True)
 
 
@@ -224,9 +228,10 @@ def process_day(day, layer_list, times):
     if n < MIN_FRAMES:
         raise RuntimeError(f"seulement {n} images récupérées pour {tag}")
     out = f"{tag}.mp4"
-    encode(workdir, out, 23)
-    if os.path.getsize(out) > MAX_MB * 1e6:
-        encode(workdir, out, 30)
+    for crf in (20, 24, 28):              # qualité décroissante si trop lourd
+        encode(workdir, out, crf)
+        if os.path.getsize(out) <= MAX_MB * 1e6:
+            break
     size = os.path.getsize(out) / 1e6
     subprocess.run(["gh", "release", "create", tag, out,
                     "--title", f"Satellite IR {tag}",
