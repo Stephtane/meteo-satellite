@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -34,6 +35,7 @@ CATCHUP_DAYS = 5                                  # nombre de jours passés à v
 MIN_FRAMES = 48                                   # en dessous : jour incomplet, ignoré
 MAX_MB = 45                                       # au-delà : recompression plus forte
 LIST_LAYERS = os.environ.get("LIST_LAYERS") == "1"
+WORKERS = 6                                       # téléchargements simultanés
 
 IR_HINTS = ("ir108", "ir105", "ir_108", "ir_105")
 PREFERRED_PREFIXES = ("mtg_fd:", "msg_fes:")      # Meteosat 0°, disque complet
@@ -131,6 +133,7 @@ def parse_times(text):
 
 # ---------------- Images ----------------
 def fetch_frame(layer_list, t):
+    """Renvoie (image, None) ou (None, message d'erreur)."""
     params = {
         "SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetMap",
         "LAYERS": ",".join(layer_list), "STYLES": "," * (len(layer_list) - 1),
@@ -138,15 +141,17 @@ def fetch_frame(layer_list, t):
         "WIDTH": WIDTH, "HEIGHT": HEIGHT, "FORMAT": "image/png",
         "TIME": t.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    err = "inconnue"
     for attempt in range(3):
         try:
-            r = requests.get(WMS_URL, params=params, timeout=90)
+            r = requests.get(WMS_URL, params=params, timeout=60)
             if r.ok and r.headers.get("Content-Type", "").startswith("image/"):
-                return Image.open(io.BytesIO(r.content)).convert("RGB")
-        except requests.RequestException:
-            pass
-        time.sleep(3 * (attempt + 1))
-    return None
+                return Image.open(io.BytesIO(r.content)).convert("RGB"), None
+            err = f"HTTP {r.status_code} : {r.text[:200]!r}"
+        except requests.RequestException as e:
+            err = f"{type(e).__name__} : {e}"
+        time.sleep(2 * (attempt + 1))
+    return None, err
 
 
 try:
@@ -187,14 +192,35 @@ def process_day(day, layer_list, times):
     workdir = f"work_{tag}"
     shutil.rmtree(workdir, ignore_errors=True)
     os.makedirs(workdir)
-    n = 0
-    for t in day_times:
-        img = fetch_frame(layer_list, t)
+    start = time.time()
+    errors = []
+
+    def job(i, t):
+        img, err = fetch_frame(layer_list, t)
         if img is None:
-            print(f"  échec de l'image de {t:%H:%M}")
-            continue
-        stamp(img, t).save(f"{workdir}/f_{n:04d}.png")
-        n += 1
+            return i, t, err
+        stamp(img, t).save(f"{workdir}/raw_{i:04d}.png")
+        return i, t, None
+
+    done = 0
+    with ThreadPoolExecutor(WORKERS) as pool:
+        futures = [pool.submit(job, i, t) for i, t in enumerate(day_times)]
+        for fut in as_completed(futures):
+            i, t, err = fut.result()
+            done += 1
+            if err:
+                errors.append(t)
+                if len(errors) <= 3:
+                    print(f"  échec de l'image de {t:%H:%M} — {err}")
+            if done % 24 == 0 or done == len(day_times):
+                print(f"  {done}/{len(day_times)} images traitées "
+                      f"({len(errors)} échecs, {time.time() - start:.0f} s)")
+
+    # renumérotation continue pour ffmpeg
+    raws = sorted(f for f in os.listdir(workdir) if f.startswith("raw_"))
+    for n, f in enumerate(raws):
+        os.rename(f"{workdir}/{f}", f"{workdir}/f_{n:04d}.png")
+    n = len(raws)
     if n < MIN_FRAMES:
         raise RuntimeError(f"seulement {n} images récupérées pour {tag}")
     out = f"{tag}.mp4"
@@ -228,7 +254,7 @@ def main():
     layer_list = [layer]
     overlays = choose_overlays(layers)
     if overlays:
-        if fetch_frame([layer, *overlays], times[-1]) is not None:
+        if fetch_frame([layer, *overlays], times[-1])[0] is not None:
             layer_list = [layer, *overlays]
             print("Côtes/frontières ajoutées :", overlays)
         else:
