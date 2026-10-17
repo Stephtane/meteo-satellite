@@ -1,0 +1,48 @@
+name: Archive satellite quotidienne
+
+on:
+  schedule:
+    - cron: "30 1 * * *"   # chaque nuit à 01:30 UTC
+  workflow_dispatch:
+    inputs:
+      list_layers:
+        description: "Diagnostic : lister les couches du serveur EUMETSAT"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Installer les outils
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          pip install -q requests pillow
+
+      - name: Fabriquer et publier les vidéos
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LIST_LAYERS: ${{ inputs.list_layers && '1' || '' }}
+          LAYER: ${{ vars.LAYER }}
+        run: python satellite.py
+
+      - name: Garder le dépôt actif
+        if: ${{ always() && !inputs.list_layers }}
+        run: |
+          date -u +"%Y-%m-%d %H:%M UTC" > derniere_execution.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add derniere_execution.txt
+          git commit -q -m "Exécution du $(date -u +%F)" || true
+          git push -q
