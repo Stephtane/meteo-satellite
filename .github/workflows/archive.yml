@@ -35,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LIST_LAYERS: ${{ inputs.list_layers && '1' || '' }}
           LAYER: ${{ vars.LAYER }}
-        run: python satellite.py
+        run: python -u satellite.py
 
       - name: Garder le dépôt actif
         if: ${{ always() && !inputs.list_layers }}
@@ -45,4 +45,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add derniere_execution.txt
           git commit -q -m "Exécution du $(date -u +%F)" || true
+          git pull -q --rebase
           git push -q
